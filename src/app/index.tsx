@@ -1,5 +1,5 @@
 import { router, Stack } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -14,91 +14,51 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnnotatedText } from '../components/AnnotatedText';
 import { Button } from '../components/Button';
-import { BuddyBubble, UserBubble } from '../components/MessageBubble';
+import { BuddyBubble, LiveBubble, UserBubble } from '../components/MessageBubble';
 import { type LookupTarget, WordSheet } from '../components/WordSheet';
-import { buddyTurn, suggestReplies } from '../lib/ai';
+import { suggestReplies } from '../lib/ai';
 import { useApiKey } from '../lib/apiKey';
 import { joinTokens } from '../lib/japanese';
-import type { AnnotatedSentence } from '../lib/schemas';
+import type { AnnotatedSentence, Token } from '../lib/schemas';
+import { MODES } from '../lib/settings';
 import { type Message, toHistory, useStore } from '../lib/store';
 import { useTheme } from '../lib/theme';
-import { useSpeechInput } from '../lib/useSpeechInput';
+import { useConversation } from '../lib/useConversation';
 import { speakJapanese, stopSpeaking } from '../lib/voice';
 
 export default function ChatScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const apiKey = useApiKey();
-  const { settings, messages, addUserMessage, applyBuddyTurn } = useStore();
+  const { settings, messages, updateSettings } = useStore();
+  const convo = useConversation(apiKey);
+  const { voice, phase } = convo;
 
-  const [thinking, setThinking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
   const [lookup, setLookup] = useState<LookupTarget | null>(null);
   const [suggestions, setSuggestions] = useState<AnnotatedSentence[] | null>(null);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [typing, setTyping] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
-  const startListeningRef = useRef<() => void>(() => {});
 
-  /** Ask the buddy to respond to the conversation as it currently stands. */
-  const runTurn = useCallback(
-    async (userMessageId: string | null) => {
-      if (!apiKey) {
-        setError('Add your Anthropic API key in Settings to start talking.');
-        return;
-      }
-      setThinking(true);
-      setError(null);
-      try {
-        const history = toHistory(useStore.getState().messages);
-        const turn = await buddyTurn(apiKey, settings, history);
-        applyBuddyTurn(userMessageId, turn);
-        if (settings.autoSpeak) {
-          speakJapanese(joinTokens(turn.reply.tokens), {
-            rate: settings.speechRate,
-            onDone: settings.handsFree ? () => startListeningRef.current() : undefined,
-          });
-        }
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setThinking(false);
-      }
-    },
-    [apiKey, settings, applyBuddyTurn],
-  );
+  const talk = settings.mode === 'talk';
+  const openMic = settings.openMic;
+  const error = convo.error ?? suggestionError;
 
-  const send = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || thinking) return;
-      setDraft('');
-      setSuggestions(null);
-      const message = addUserMessage(trimmed);
-      runTurn(message.id);
-    },
-    [addUserMessage, runTurn, thinking],
-  );
-
-  const speech = useSpeechInput({
-    preferOnDevice: settings.onDeviceRecognition,
-    onFinal: (text) => (settings.autoSendSpeech ? send(text) : setDraft(text)),
-  });
-  startListeningRef.current = speech.start;
-
-  const retry = () => {
-    const last = messages[messages.length - 1];
-    runTurn(last?.role === 'user' ? last.id : null);
+  const send = (text: string) => {
+    setSuggestions(null);
+    convo.send(text);
   };
 
   const showSuggestions = async () => {
     if (suggestions) return setSuggestions(null);
-    if (!apiKey) return setError('Add your Anthropic API key in Settings first.');
+    if (!apiKey) return setSuggestionError('Add your Anthropic API key in Settings first.');
     setLoadingSuggestions(true);
+    setSuggestionError(null);
     try {
       setSuggestions(await suggestReplies(apiKey, settings, toHistory(messages)));
     } catch (e) {
-      setError((e as Error).message);
+      setSuggestionError((e as Error).message);
     } finally {
       setLoadingSuggestions(false);
     }
@@ -107,9 +67,52 @@ export default function ChatScreen() {
   useEffect(() => {
     const id = setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     return () => clearTimeout(id);
-  }, [messages.length, thinking]);
+  }, [messages.length, phase, convo.live]);
 
   const lastIsUser = messages[messages.length - 1]?.role === 'user';
+  const openLookup = (token: Token, context: string) => setLookup({ token, query: token.surface, context });
+
+  const status = (() => {
+    if (voice.error) return { text: voice.error, color: theme.danger };
+    if (voice.pausedForIdle) return { text: 'Paused after a quiet spell. Tap Resume to keep talking.', color: theme.textMuted };
+    if (!voice.active) return { text: 'Tap Start and just talk. A short pause ends your turn.', color: theme.textMuted };
+    if (phase === 'thinking') return { text: '考え中…', color: theme.textMuted };
+    if (phase === 'speaking') {
+      return {
+        text: settings.bargeIn ? 'Speaking… just talk to interrupt' : 'Speaking… tap to interrupt',
+        color: theme.textMuted,
+      };
+    }
+    return { text: voice.transcript || '聞いています… go ahead', color: voice.transcript ? theme.text : theme.textMuted };
+  })();
+
+  const textRow = (
+    <>
+      <TextInput
+        value={convo.draft}
+        onChangeText={convo.setDraft}
+        placeholder="日本語で話してみよう…"
+        placeholderTextColor={theme.textMuted}
+        style={[styles.input, { color: theme.text, backgroundColor: theme.surface, borderColor: theme.border }]}
+        multiline
+        onFocus={() => {
+          if (phase === 'speaking') convo.interrupt();
+          else stopSpeaking();
+        }}
+      />
+      <Pressable
+        onPress={() => send(convo.draft)}
+        disabled={phase === 'thinking' || !convo.draft.trim()}
+        style={[
+          styles.iconButton,
+          { backgroundColor: theme.accent, opacity: phase === 'thinking' || !convo.draft.trim() ? 0.5 : 1 },
+        ]}
+        accessibilityLabel="Send"
+      >
+        <Text style={{ color: theme.accentText, fontSize: 18, fontWeight: '700' }}>↑</Text>
+      </Pressable>
+    </>
+  );
 
   return (
     <KeyboardAvoidingView
@@ -132,6 +135,22 @@ export default function ChatScreen() {
         }}
       />
 
+      <View style={[styles.modes, { backgroundColor: theme.surfaceMuted }]}>
+        {MODES.map((m) => (
+          <Pressable
+            key={m.id}
+            onPress={() => updateSettings({ mode: m.id })}
+            style={[styles.modeButton, settings.mode === m.id && { backgroundColor: theme.surface }]}
+            accessibilityRole="button"
+            accessibilityState={{ selected: settings.mode === m.id }}
+          >
+            <Text style={{ color: settings.mode === m.id ? theme.text : theme.textMuted, fontWeight: '600' }}>
+              {m.label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
       <FlatList
         ref={listRef}
         data={messages}
@@ -142,36 +161,36 @@ export default function ChatScreen() {
             <BuddyBubble
               message={item}
               settings={settings}
-              onTokenPress={(token, context) => setLookup({ token, query: token.surface, context })}
-              onExplain={(sentence) =>
-                send(`Could you explain 「${sentence}」 in English? Break down the grammar and vocabulary.`)
+              onTokenPress={openLookup}
+              onExplain={
+                talk
+                  ? undefined
+                  : (sentence) =>
+                      send(`Could you explain 「${sentence}」 in English? Break down the grammar and vocabulary.`)
               }
             />
           ) : (
-            <UserBubble
-              message={item}
-              settings={settings}
-              onTokenPress={(token, context) => setLookup({ token, query: token.surface, context })}
-            />
+            <UserBubble message={item} settings={settings} onTokenPress={openLookup} />
           )
         }
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: theme.text }]}>こんにちは！</Text>
             <Text style={[styles.emptyBody, { color: theme.textMuted }]}>
-              Aibou is your Japanese speaking buddy. Tap the mic and talk in Japanese. If you get stuck, ask in
-              English, tap any word to look it up, or tap 💡 for ideas of what to say.
+              {talk
+                ? 'Aibou is your Japanese conversation partner. Tap Start and just talk: no buttons, just pause when you’re done. Tap any word later to look it up.'
+                : 'Aibou will correct your Japanese and explain anything you ask about. Talk, or ask in English when you’re stuck. Tap any word to look it up, or 💡 for ideas.'}
             </Text>
-            {apiKey === null ? (
-              <Button primary label="Add your API key" onPress={() => router.push('/settings')} />
-            ) : (
-              <Button primary label="Start a conversation" onPress={() => runTurn(null)} disabled={thinking} />
+            {apiKey === null && <Button primary label="Add your API key" onPress={() => router.push('/settings')} />}
+            {apiKey && !openMic && (
+              <Button primary label="Start a conversation" onPress={() => convo.runTurn(null)} disabled={phase !== 'idle'} />
             )}
           </View>
         }
         ListFooterComponent={
           <View style={{ gap: 8 }}>
-            {thinking && (
+            {convo.live !== null && <LiveBubble text={convo.live} />}
+            {phase === 'thinking' && convo.live === null && (
               <View style={styles.thinking}>
                 <ActivityIndicator color={theme.accent} />
                 <Text style={{ color: theme.textMuted }}>考え中…</Text>
@@ -180,7 +199,9 @@ export default function ChatScreen() {
             {error && (
               <View style={[styles.error, { borderColor: theme.danger }]}>
                 <Text style={{ color: theme.danger, flex: 1 }}>{error}</Text>
-                {apiKey && lastIsUser && !thinking && <Button small label="Retry" onPress={retry} />}
+                {apiKey && lastIsUser && phase === 'idle' && !!convo.error && (
+                  <Button small label="Retry" onPress={convo.retry} />
+                )}
               </View>
             )}
           </View>
@@ -195,7 +216,7 @@ export default function ChatScreen() {
               <Pressable
                 key={i}
                 onPress={() => {
-                  setDraft(text);
+                  if (!openMic) convo.setDraft(text);
                   speakJapanese(text, { rate: settings.speechRate });
                 }}
                 style={[styles.suggestion, { backgroundColor: theme.surfaceMuted }]}
@@ -211,63 +232,107 @@ export default function ChatScreen() {
         </View>
       )}
 
-      {(speech.listening || speech.error) && (
+      {!openMic && (voice.active || voice.error) && (
         <View style={[styles.live, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-          <Text style={{ color: speech.error ? theme.danger : theme.text, fontSize: 18 }}>
-            {speech.error ?? (speech.transcript || '聞いています… Listening')}
+          <Text style={{ color: voice.error ? theme.danger : theme.text, fontSize: 18 }}>
+            {voice.error ?? (voice.transcript || '聞いています… Listening')}
           </Text>
         </View>
       )}
 
-      <View
-        style={[
-          styles.composer,
-          { borderColor: theme.border, backgroundColor: theme.background, paddingBottom: insets.bottom + 8 },
-        ]}
-      >
-        <Pressable
-          onPress={showSuggestions}
-          style={[styles.iconButton, { backgroundColor: theme.surfaceMuted }]}
-          accessibilityLabel="Suggest what to say"
+      {openMic ? (
+        <View style={[styles.bar, { borderColor: theme.border, paddingBottom: insets.bottom + 8 }]}>
+          {typing && <View style={styles.row}>{textRow}</View>}
+          <View style={styles.row}>
+            <Pressable
+              onPress={showSuggestions}
+              style={[styles.iconButton, { backgroundColor: theme.surfaceMuted }]}
+              accessibilityLabel="Suggest what to say"
+            >
+              {loadingSuggestions ? <ActivityIndicator color={theme.accent} /> : <Text style={{ fontSize: 20 }}>💡</Text>}
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                voice.clearError();
+                if (phase === 'speaking') convo.interrupt();
+              }}
+              style={[styles.status, { backgroundColor: theme.surface, borderColor: theme.border }]}
+              accessibilityLiveRegion="polite"
+            >
+              {voice.active && phase === 'idle' && <View style={[styles.dot, { backgroundColor: theme.danger }]} />}
+              <Text style={{ color: status.color, fontSize: 16, flex: 1 }} numberOfLines={3}>
+                {status.text}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setTyping((v) => !v)}
+              style={[styles.iconButton, { backgroundColor: theme.surfaceMuted }]}
+              accessibilityLabel="Type instead"
+            >
+              <Text style={{ fontSize: 18 }}>⌨️</Text>
+            </Pressable>
+          </View>
+          {voice.active ? (
+            <Button label="End conversation" onPress={convo.endConversation} />
+          ) : (
+            <Button
+              primary
+              label={voice.pausedForIdle || messages.length > 0 ? '🎙 Resume talking' : '🎙 Start talking'}
+              onPress={convo.startConversation}
+              disabled={!apiKey || phase === 'thinking'}
+            />
+          )}
+        </View>
+      ) : (
+        <View
+          style={[
+            styles.composer,
+            { borderColor: theme.border, backgroundColor: theme.background, paddingBottom: insets.bottom + 8 },
+          ]}
         >
-          {loadingSuggestions ? <ActivityIndicator color={theme.accent} /> : <Text style={{ fontSize: 20 }}>💡</Text>}
-        </Pressable>
-        <TextInput
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="日本語で話してみよう…"
-          placeholderTextColor={theme.textMuted}
-          style={[styles.input, { color: theme.text, backgroundColor: theme.surface, borderColor: theme.border }]}
-          multiline
-          onFocus={() => stopSpeaking()}
-        />
-        {draft.trim() ? (
           <Pressable
-            onPress={() => send(draft)}
-            disabled={thinking}
-            style={[styles.iconButton, { backgroundColor: theme.accent, opacity: thinking ? 0.5 : 1 }]}
-            accessibilityLabel="Send"
+            onPress={showSuggestions}
+            style={[styles.iconButton, { backgroundColor: theme.surfaceMuted }]}
+            accessibilityLabel="Suggest what to say"
           >
-            <Text style={{ color: theme.accentText, fontSize: 18, fontWeight: '700' }}>↑</Text>
+            {loadingSuggestions ? <ActivityIndicator color={theme.accent} /> : <Text style={{ fontSize: 20 }}>💡</Text>}
           </Pressable>
-        ) : (
-          <Pressable
-            onPress={() => {
-              speech.clearError();
-              if (speech.listening) speech.stop();
-              else speech.start();
-            }}
-            disabled={thinking}
-            style={[
-              styles.mic,
-              { backgroundColor: speech.listening ? theme.danger : theme.accent, opacity: thinking ? 0.5 : 1 },
-            ]}
-            accessibilityLabel={speech.listening ? 'Stop listening' : 'Speak'}
-          >
-            <Text style={{ fontSize: 24 }}>{speech.listening ? '■' : '🎤'}</Text>
-          </Pressable>
-        )}
-      </View>
+          {convo.draft.trim() ? (
+            textRow
+          ) : (
+            <>
+              <TextInput
+                value={convo.draft}
+                onChangeText={convo.setDraft}
+                placeholder="日本語で話してみよう…"
+                placeholderTextColor={theme.textMuted}
+                style={[styles.input, { color: theme.text, backgroundColor: theme.surface, borderColor: theme.border }]}
+                multiline
+                onFocus={() => stopSpeaking()}
+              />
+              <Pressable
+                onPress={() => {
+                  voice.clearError();
+                  if (phase === 'speaking') convo.interrupt();
+                  if (voice.active) voice.stop();
+                  else voice.start();
+                }}
+                disabled={phase === 'thinking'}
+                style={[
+                  styles.mic,
+                  {
+                    backgroundColor: voice.active ? theme.danger : theme.accent,
+                    opacity: phase === 'thinking' ? 0.5 : 1,
+                  },
+                ]}
+                accessibilityLabel={voice.active ? 'Stop listening' : 'Speak'}
+              >
+                <Text style={{ fontSize: 24 }}>{voice.active ? '■' : '🎤'}</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      )}
 
       <WordSheet target={lookup} onClose={() => setLookup(null)} />
     </KeyboardAvoidingView>
@@ -279,6 +344,22 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 32, fontWeight: '700' },
   emptyBody: { fontSize: 16, lineHeight: 23, textAlign: 'center' },
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 8 },
+  modes: { flexDirection: 'row', marginHorizontal: 16, marginTop: 4, padding: 3, borderRadius: 12 },
+  modeButton: { flex: 1, alignItems: 'center', paddingVertical: 7, borderRadius: 9 },
+  bar: { gap: 10, paddingHorizontal: 12, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  status: {
+    flex: 1,
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  dot: { width: 10, height: 10, borderRadius: 5 },
   error: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 12, borderWidth: 1, borderRadius: 12 },
   suggestions: { marginHorizontal: 12, padding: 10, gap: 8, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
   suggestion: { padding: 10, borderRadius: 12, gap: 4 },

@@ -2,13 +2,25 @@
 
 Aibou is a phone app for practising **spoken** Japanese. You talk to it in Japanese, and it talks back.
 
-- **Voice first.** Tap the mic, speak Japanese, and Aibou answers out loud. Turn on *hands-free* and it starts listening again as soon as it finishes talking, so it feels like a real conversation.
+It has two styles, switchable at the top of the chat:
+
+- **Free talk** (default): a natural conversation partner with its own opinions and stories, not a teacher. It matches how casual or polite you are and doesn't correct you. Replies stream in, and Aibou starts speaking the first sentence while the rest is still being written.
+- **Learning**: a tutor that corrects your Japanese and explains grammar as you go.
+
+And it's hands-free by default:
+
+- **Open mic.** Tap *Start talking* once. From then on the mic stays on: talk, pause, and Aibou answers. The pause length is adjustable (0.8–2.5 s) in Settings.
+- **Interrupt any time.** Start talking while Aibou is speaking and it stops to listen, like a real person would. It remembers only the part you actually heard. **Use earbuds** for this: on the phone speaker, the mic can hear Aibou's own voice. The app uses iOS echo cancellation and ignores speech that matches what Aibou is saying, but earbuds are much more reliable.
+- It pauses itself after two minutes of silence to save battery. Prefer tapping the mic each time? Turn off *Open mic* in Settings.
+
+It also helps you read and learn along the way:
+
 - **Readings on everything.** Every sentence, yours and Aibou's, is split into words with furigana above the kanji and romaji underneath. Each can be toggled on or off.
 - **Tap any word to look it up.** You get the reading, the meaning in context, and the dictionary form. *Explain more* adds nuance, a JLPT level, and example sentences. You can save words to your list and search for new ones.
-- **Gentle corrections.** If something you said was unnatural, a green card under your message shows the more natural phrasing (tap it to hear it) and explains why.
-- **Ask about anything.** Ask in English: "what's the difference between は and が?", "why ました here?". The explanation appears in a yellow note, and the conversation carries on in Japanese. The *Explain* button on any reply breaks that sentence down for you.
+- **Gentle corrections** (learning mode). If something you said was unnatural, a green card under your message shows the more natural phrasing (tap it to hear it) and explains why.
+- **Ask about anything** (learning mode). Ask in English: "what's the difference between は and が?", "why ました here?". The explanation appears in a yellow note, and the conversation carries on in Japanese. The *Explain* button on any reply breaks that sentence down for you.
 - **Stuck?** Tap 💡 for three things you could say next. Tap one to hear it, then try saying it yourself.
-- Settings for level (beginner, elementary, intermediate), topic or scenario ("ordering at a café"), speaking speed, and AI model.
+- Settings for level (beginner through advanced, which is "talk to me like a Japanese friend"), topic or scenario ("ordering at a café"), speaking speed, and AI model.
 
 ## How it works
 
@@ -17,7 +29,7 @@ Aibou is a phone app for practising **spoken** Japanese. You talk to it in Japan
 | Speech → text (your voice) | **On the phone** where possible | Apple Speech (iOS) / Google (Android) via `expo-speech-recognition`, with `requiresOnDeviceRecognition` so audio stays on the device. It falls back to Apple's or Google's servers only if no on-device Japanese model is installed. |
 | Text → speech (Aibou's voice) | **On the phone** | The system Japanese voice via `expo-speech`. For a much nicer voice on iOS, download an *Enhanced* Japanese voice in Settings → Accessibility → Spoken Content → Voices → Japanese. Aibou picks it up automatically. |
 | Romaji | **On the phone** | Computed from the kana readings with `wanakana` |
-| Conversation, corrections, readings, explanations | Cloud | Claude via the Anthropic API, using structured outputs so every reply arrives already split into words with readings and glosses |
+| Conversation, corrections, readings, explanations | Cloud | Claude via the Anthropic API. In free talk, the reply is streamed as plain text and spoken sentence by sentence, and the readings/word lookups are fetched in the background afterwards. In learning mode, one structured-output call returns the reply already split into words with readings, glosses, and corrections. |
 | Your chats, saved words, settings | **On the phone** | AsyncStorage. Your API key is stored in the iOS Keychain / Android Keystore. |
 
 ### Why the "brain" isn't on the phone (yet)
@@ -56,10 +68,10 @@ After installing the build, run `npx expo start` on your computer and open the a
 
 ## Choosing a model
 
-Settings → AI model:
+Settings has two model choices:
 
-- **Claude Opus 5** (default): the best corrections and explanations.
-- **Claude Sonnet 5**: faster replies at a lower cost per message, which suits long casual chats.
+- **Free talk** defaults to **Claude Sonnet 5**, for quick replies at a lower cost per message.
+- **Learning & lookups** defaults to **Claude Opus 5**, for the best corrections and explanations.
 
 Conversations use prompt caching, so each new turn mostly pays only for the new messages.
 
@@ -79,9 +91,10 @@ src/
     ai.ts              Claude calls (conversation turn, word lookup, suggestions)
     prompts.ts         system prompts
     schemas.ts         structured-output schemas (zod)
-    japanese.ts        romaji / furigana helpers (+ tests)
-    useSpeechInput.ts  push-to-talk Japanese speech recognition
-    voice.ts           Japanese text-to-speech
+    japanese.ts        romaji / furigana, sentence splitting, echo detection (+ tests)
+    useConversation.ts the talk loop: listen → reply → speak → listen, interruptions
+    useVoiceInput.ts   Japanese speech recognition (open mic with pause detection, or tap to talk)
+    voice.ts           Japanese text-to-speech, including the sentence-by-sentence queue
     store.ts           persisted chat, vocab, and settings (zustand)
 ```
 

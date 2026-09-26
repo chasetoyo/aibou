@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { joinTokens } from '../lib/japanese';
 import type { Token } from '../lib/schemas';
 import type { BuddyMessage, UserMessage } from '../lib/store';
 import type { Settings } from '../lib/settings';
@@ -19,10 +18,10 @@ export function BuddyBubble({
   settings,
   onTokenPress,
   onExplain,
-}: CommonProps & { message: BuddyMessage; onExplain: (sentence: string) => void }) {
+}: CommonProps & { message: BuddyMessage; onExplain?: (sentence: string) => void }) {
   const theme = useTheme();
   const [showTranslation, setShowTranslation] = useState(settings.showTranslation);
-  const sentence = joinTokens(message.reply.tokens);
+  const sentence = message.text;
 
   return (
     <View style={styles.buddyRow}>
@@ -32,22 +31,42 @@ export function BuddyBubble({
             <Text style={{ color: theme.explanationText, lineHeight: 21 }}>{message.explanation}</Text>
           </View>
         )}
-        <AnnotatedText
-          tokens={message.reply.tokens}
-          showFurigana={settings.showFurigana}
-          showRomaji={settings.showRomaji}
-          onTokenPress={(t) => onTokenPress(t, sentence)}
-        />
-        <Pressable onPress={() => setShowTranslation((v) => !v)} hitSlop={8}>
-          <Text style={[styles.translation, { color: theme.textMuted }]}>
-            {showTranslation ? message.reply.translation : 'Show English'}
-          </Text>
-        </Pressable>
+        {message.reply ? (
+          <AnnotatedText
+            tokens={message.reply.tokens}
+            showFurigana={settings.showFurigana}
+            showRomaji={settings.showRomaji}
+            onTokenPress={(t) => onTokenPress(t, sentence)}
+          />
+        ) : (
+          // Free talk: readings arrive a moment after the reply is spoken.
+          <Text style={[styles.plain, { color: theme.text }]}>{message.text}</Text>
+        )}
+        {message.interrupted && <Text style={[styles.translation, { color: theme.textMuted }]}>(interrupted)</Text>}
+        {!!message.reply?.translation && (
+          <Pressable onPress={() => setShowTranslation((v) => !v)} hitSlop={8}>
+            <Text style={[styles.translation, { color: theme.textMuted }]}>
+              {showTranslation ? message.reply.translation : 'Show English'}
+            </Text>
+          </Pressable>
+        )}
         <View style={styles.actions}>
           <Button small label="🔊 Replay" onPress={() => speakJapanese(sentence, { rate: settings.speechRate })} />
           <Button small label="🐢 Slow" onPress={() => speakJapanese(sentence, { rate: 0.6 })} />
-          <Button small label="Explain" onPress={() => onExplain(sentence)} />
+          {onExplain && <Button small label="Explain" onPress={() => onExplain(sentence)} />}
         </View>
+      </View>
+    </View>
+  );
+}
+
+/** A reply that's still streaming in. */
+export function LiveBubble({ text }: { text: string }) {
+  const theme = useTheme();
+  return (
+    <View style={styles.buddyRow}>
+      <View style={[styles.bubble, styles.buddyBubble, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+        <Text style={[styles.plain, { color: theme.text }]}>{text}▍</Text>
       </View>
     </View>
   );
@@ -98,6 +117,7 @@ const styles = StyleSheet.create({
   userRow: { alignItems: 'flex-end', marginVertical: 6 },
   bubble: { maxWidth: '92%', padding: 14, borderRadius: 18, gap: 8 },
   buddyBubble: { borderWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 6 },
+  plain: { fontSize: 22, lineHeight: 32 },
   translation: { fontSize: 14, fontStyle: 'italic' },
   actions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   note: { padding: 10, borderRadius: 12 },

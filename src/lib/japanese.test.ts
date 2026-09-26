@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isPunctuation, joinTokens, needsFurigana, normaliseReading, tokensToRomaji } from './japanese.ts';
+import {
+  isPunctuation,
+  joinTokens,
+  looksLikeEcho,
+  needsFurigana,
+  normaliseReading,
+  takeSentences,
+  tokensToRomaji,
+} from './japanese.ts';
 
 const t = (surface: string, reading: string, part_of_speech = 'noun') => ({
   surface,
@@ -42,4 +50,21 @@ test('isPunctuation', () => {
   assert.equal(isPunctuation(sentence[5]), true);
   assert.equal(isPunctuation(t('！', '', 'symbol')), true);
   assert.equal(isPunctuation(sentence[1]), false);
+});
+
+test('takeSentences splits finished sentences and keeps the remainder', () => {
+  assert.deepEqual(takeSentences('そうなんだ！どこに行ったの？私は昨日'), {
+    sentences: ['そうなんだ！', 'どこに行ったの？'],
+    rest: '私は昨日',
+  });
+  assert.deepEqual(takeSentences('「いいね。」と言った'), { sentences: ['「いいね。」'], rest: 'と言った' });
+  assert.deepEqual(takeSentences('まだ途中'), { sentences: [], rest: 'まだ途中' });
+});
+
+test('looksLikeEcho recognises the buddy hearing itself', () => {
+  const spoken = '週末は何をする予定ですか？';
+  assert.equal(looksLikeEcho('週末は何をする予定', spoken), true);
+  assert.equal(looksLikeEcho('えっと', spoken), false);
+  assert.equal(looksLikeEcho('ちょっと待って', spoken), false);
+  assert.equal(looksLikeEcho('あ', spoken), true);
 });

@@ -46,3 +46,44 @@ export function normaliseReading(token: Token): Token {
 export function isPunctuation(token: Token): boolean {
   return token.part_of_speech === 'punctuation' || /^[\s、。！？!?,.「」『』（）()…・〜ー]+$/.test(token.surface);
 }
+
+const SENTENCE_END = /[。！？!?\n]+[」』）)]*/g;
+
+/**
+ * Split streamed text into complete sentences (ready to be spoken) and the
+ * unfinished remainder that should wait for more text.
+ */
+export function takeSentences(buffer: string): { sentences: string[]; rest: string } {
+  const sentences: string[] = [];
+  let start = 0;
+  for (const match of buffer.matchAll(SENTENCE_END)) {
+    const end = match.index + match[0].length;
+    const sentence = buffer.slice(start, end).trim();
+    if (sentence) sentences.push(sentence);
+    start = end;
+  }
+  return { sentences, rest: buffer.slice(start) };
+}
+
+const IGNORABLE = /[\s、。！？!?,.「」『』（）()…・〜ー]/g;
+
+function bigrams(text: string): string[] {
+  const chars = [...text];
+  if (chars.length < 2) return chars;
+  return chars.slice(1).map((c, i) => chars[i] + c);
+}
+
+/**
+ * Whether speech the microphone picked up is probably Aibou hearing its own
+ * voice through the speaker, rather than the learner talking over it.
+ */
+export function looksLikeEcho(heard: string, spoken: string): boolean {
+  const h = toHiragana(heard.replace(IGNORABLE, ''));
+  const s = toHiragana(spoken.replace(IGNORABLE, ''));
+  if ([...h].length < 2) return true; // too short to be a real interruption
+  if (!s) return false;
+  const spokenGrams = new Set(bigrams(s));
+  const heardGrams = bigrams(h);
+  const overlap = heardGrams.filter((g) => spokenGrams.has(g)).length;
+  return overlap / heardGrams.length >= 0.5;
+}

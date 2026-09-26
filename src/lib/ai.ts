@@ -2,16 +2,24 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import type { z } from 'zod';
 import { normaliseReading } from './japanese';
-import { buddySystemPrompt, lookupSystemPrompt, suggestionsSystemPrompt } from './prompts';
+import {
+  annotateSystemPrompt,
+  buddySystemPrompt,
+  lookupSystemPrompt,
+  suggestionsSystemPrompt,
+  talkSystemPrompt,
+} from './prompts';
 import {
   type AnnotatedSentence,
   type BuddyTurn,
   BuddyTurnSchema,
+  type ExchangeAnnotation,
+  ExchangeAnnotationSchema,
   SuggestionsSchema,
   type WordLookup,
   WordLookupSchema,
 } from './schemas';
-import type { Settings } from './settings';
+import type { ModelId, Settings } from './settings';
 
 export type Effort = 'low' | 'medium' | 'high';
 
@@ -25,6 +33,8 @@ export class BuddyError extends Error {}
 
 const OPENING = '(The learner just opened the app. Greet them and start a conversation.)';
 
+// On iOS/Android, Expo's global `fetch` supports streamed responses, which the
+// SDK needs for `messages.stream`.
 function client(apiKey: string) {
   return new Anthropic({
     apiKey,
@@ -35,9 +45,16 @@ function client(apiKey: string) {
   });
 }
 
+/** If Opus declines a request, let the API retry it on a fallback model. */
+function fallbackParams(model: ModelId) {
+  return model === 'claude-opus-5'
+    ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
+    : {};
+}
+
 async function ask<T>(
   apiKey: string,
-  settings: Settings,
+  model: ModelId,
   schema: z.ZodType<T>,
   system: string,
   messages: Anthropic.Beta.BetaMessageParam[],
@@ -45,17 +62,14 @@ async function ask<T>(
 ): Promise<T> {
   try {
     const response = await client(apiKey).beta.messages.parse({
-      model: settings.model,
+      model,
       max_tokens: 16000,
       // Caches the growing conversation so each turn only pays for the new part.
       cache_control: { type: 'ephemeral' },
       system,
       messages,
       output_config: { effort, format: betaZodOutputFormat(schema) },
-      // If Opus declines a request, let the API retry it on a fallback model.
-      ...(settings.model === 'claude-opus-5'
-        ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
-        : {}),
+      ...fallbackParams(model),
     });
 
     if (response.stop_reason === 'refusal') {
@@ -116,7 +130,7 @@ function toMessages(history: HistoryTurn[]): Anthropic.Beta.BetaMessageParam[] {
 export async function buddyTurn(apiKey: string, settings: Settings, history: HistoryTurn[]): Promise<BuddyTurn> {
   const turn = await ask(
     apiKey,
-    settings,
+    settings.model,
     BuddyTurnSchema,
     buddySystemPrompt(settings.level, settings.topic.trim()),
     toMessages(history),
@@ -140,7 +154,7 @@ export async function lookupWord(
     : `Look up: ${query}`;
   const result = await ask(
     apiKey,
-    settings,
+    settings.model,
     WordLookupSchema,
     lookupSystemPrompt(settings.level),
     [{ role: 'user', content: prompt }],
@@ -160,11 +174,74 @@ export async function suggestReplies(
     .join('\n');
   const result = await ask(
     apiKey,
-    settings,
+    settings.mode === 'talk' ? settings.talkModel : settings.model,
     SuggestionsSchema,
     suggestionsSystemPrompt(settings.level),
     [{ role: 'user', content: transcript || 'The conversation has not started yet. Suggest ways to open it.' }],
     'low',
   );
   return result.suggestions.map(cleanSentence);
+}
+
+/**
+ * Free talk: stream a plain-Japanese reply so it can be spoken sentence by
+ * sentence while the rest is still being written. Aborting `signal` (the
+ * learner talked over Aibou) returns whatever was written so far.
+ */
+export async function streamTalkReply(
+  apiKey: string,
+  settings: Settings,
+  history: HistoryTurn[],
+  onText: (delta: string) => void,
+  signal: AbortSignal,
+): Promise<{ text: string; interrupted: boolean }> {
+  let text = '';
+  try {
+    const stream = client(apiKey).beta.messages.stream(
+      {
+        model: settings.talkModel,
+        max_tokens: 16000,
+        cache_control: { type: 'ephemeral' },
+        system: talkSystemPrompt(settings.level, settings.topic.trim()),
+        messages: toMessages(history),
+        output_config: { effort: 'low' },
+        ...fallbackParams(settings.talkModel),
+      },
+      { signal },
+    );
+    stream.on('text', (delta) => {
+      text += delta;
+      onText(delta);
+    });
+    const message = await stream.finalMessage();
+    if (message.stop_reason === 'refusal') {
+      throw new BuddyError("Aibou couldn't answer that one. Try saying it another way?");
+    }
+    return { text, interrupted: false };
+  } catch (error) {
+    if (error instanceof Anthropic.APIUserAbortError) return { text, interrupted: true };
+    throw toBuddyError(error);
+  }
+}
+
+/**
+ * Free talk: after a reply has been spoken, fill in the reader view (readings,
+ * romaji, word lookups) for the learner's message and the reply.
+ */
+export async function annotateExchange(
+  apiKey: string,
+  settings: Settings,
+  learnerText: string | null,
+  replyText: string,
+): Promise<ExchangeAnnotation> {
+  const prompt = `Learner: ${learnerText ?? '(nothing — Aibou opened the conversation)'}\nAibou: ${replyText}`;
+  const result = await ask(
+    apiKey,
+    settings.talkModel,
+    ExchangeAnnotationSchema,
+    annotateSystemPrompt(),
+    [{ role: 'user', content: prompt }],
+    'low',
+  );
+  return { learner: cleanSentence(result.learner), reply: cleanSentence(result.reply) };
 }

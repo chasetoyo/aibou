@@ -59,6 +59,11 @@ export const WordLookupSchema = z.object({
   examples: z.array(AnnotatedSentenceSchema).describe('Two or three simple example sentences.'),
 });
 
+export const ExchangeAnnotationSchema = z.object({
+  learner: AnnotatedSentenceSchema.describe("The learner's message. Empty tokens if it had no Japanese."),
+  reply: AnnotatedSentenceSchema.describe("Aibou's reply."),
+});
+
 export const SuggestionsSchema = z.object({
   suggestions: z.array(AnnotatedSentenceSchema).describe('Three things the learner could say next.'),
 });
@@ -66,4 +71,5 @@ export const SuggestionsSchema = z.object({
 export type Token = z.infer<typeof TokenSchema>;
 export type AnnotatedSentence = z.infer<typeof AnnotatedSentenceSchema>;
 export type BuddyTurn = z.infer<typeof BuddyTurnSchema>;
+export type ExchangeAnnotation = z.infer<typeof ExchangeAnnotationSchema>;
 export type WordLookup = z.infer<typeof WordLookupSchema>;

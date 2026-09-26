@@ -4,7 +4,7 @@ import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View
 import { Button } from '../components/Button';
 import { saveApiKey, useApiKey } from '../lib/apiKey';
 import { useStore } from '../lib/store';
-import { LEVELS, MODELS, type Settings } from '../lib/settings';
+import { LEVELS, MODELS, MODES, type Settings } from '../lib/settings';
 import { useTheme } from '../lib/theme';
 import { speakJapanese } from '../lib/voice';
 
@@ -74,6 +74,9 @@ export default function SettingsScreen() {
         onPress={() => saveApiKey(keyDraft)}
       />
 
+      <Text style={[styles.heading, { color: theme.textMuted }]}>Conversation style</Text>
+      {choice(MODES, settings.mode, (mode) => updateSettings({ mode }))}
+
       <Text style={[styles.heading, { color: theme.textMuted }]}>Your level</Text>
       {choice(LEVELS, settings.level, (level) => updateSettings({ level }))}
 
@@ -93,9 +96,34 @@ export default function SettingsScreen() {
       {toggle('showTranslation', 'Show English by default')}
 
       <Text style={[styles.heading, { color: theme.textMuted }]}>Voice</Text>
+      {toggle('openMic', 'Open mic', 'Just talk: the mic stays on and a short pause ends your turn. Off: tap the mic each time.')}
+      {settings.openMic && (
+        <>
+          {toggle('bargeIn', 'Let me interrupt', 'Talking while Aibou speaks cuts it off. Works best with earbuds.')}
+          <View style={[styles.row, { borderColor: theme.border }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: theme.text, fontSize: 16 }}>Pause before Aibou replies</Text>
+              <Text style={{ color: theme.textMuted, fontSize: 13, marginTop: 2 }}>
+                Longer gives you time to think mid-sentence
+              </Text>
+            </View>
+            {[800, 1200, 1800, 2500].map((ms) => (
+              <Pressable
+                key={ms}
+                onPress={() => updateSettings({ pauseMs: ms })}
+                style={[styles.rate, { borderColor: settings.pauseMs === ms ? theme.accent : theme.border }]}
+              >
+                <Text style={{ color: theme.text }}>{ms / 1000}s</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>
+      )}
       {toggle('autoSpeak', 'Read replies aloud')}
-      {toggle('handsFree', 'Hands-free conversation', 'Start listening again after Aibou finishes speaking')}
-      {toggle('autoSendSpeech', 'Send speech automatically', 'Off: review and edit what was heard before sending')}
+      {!settings.openMic &&
+        toggle('handsFree', 'Hands-free', 'Start listening again after Aibou finishes speaking')}
+      {!settings.openMic &&
+        toggle('autoSendSpeech', 'Send speech automatically', 'Off: review and edit what was heard before sending')}
       {toggle(
         'onDeviceRecognition',
         'On-device speech recognition',
@@ -120,7 +148,10 @@ export default function SettingsScreen() {
         ))}
       </View>
 
-      <Text style={[styles.heading, { color: theme.textMuted }]}>AI model</Text>
+      <Text style={[styles.heading, { color: theme.textMuted }]}>AI model for free talk</Text>
+      {choice(MODELS, settings.talkModel, (talkModel) => updateSettings({ talkModel }))}
+
+      <Text style={[styles.heading, { color: theme.textMuted }]}>AI model for learning & lookups</Text>
       {choice(MODELS, settings.model, (model) => updateSettings({ model }))}
 
       <Text style={[styles.heading, { color: theme.textMuted }]}>Conversation</Text>
